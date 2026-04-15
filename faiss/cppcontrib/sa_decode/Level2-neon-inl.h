@@ -1849,6 +1849,389 @@ struct Index2LevelDecoderImpl<
     }
 };
 
+// Scalar fallback for FINE_SIZE != 4 with QPOS_LEFT < 4 (e.g. FINE_SIZE=2).
+template <
+        intptr_t DIM,
+        intptr_t COARSE_SIZE,
+        intptr_t FINE_SIZE,
+        intptr_t COARSE_BITS,
+        intptr_t FINE_BITS,
+        intptr_t CPOS>
+struct Index2LevelDecoderImpl<
+        DIM,
+        COARSE_SIZE,
+        FINE_SIZE,
+        COARSE_BITS,
+        FINE_BITS,
+        CPOS,
+        false,
+        false,
+        false,
+        false> {
+    static constexpr intptr_t coarseCentroidIdx = CPOS / COARSE_SIZE;
+    static constexpr intptr_t coarseCentroidOffset = CPOS % COARSE_SIZE;
+    static constexpr intptr_t fineCentroidIdx = CPOS / FINE_SIZE;
+    static constexpr intptr_t fineCentroidOffset = CPOS % FINE_SIZE;
+    static constexpr intptr_t QPOS_LEFT = FINE_SIZE - fineCentroidOffset;
+
+    static constexpr intptr_t COARSE_TABLE_BYTES = (1 << COARSE_BITS);
+    static constexpr intptr_t N_COARSE_ELEMENTS = DIM / COARSE_SIZE;
+    static constexpr intptr_t N_COARSE_ELEMENTS_BITS =
+            N_COARSE_ELEMENTS * COARSE_BITS;
+    static constexpr intptr_t N_COARSE_ELEMENTS_BYTES =
+            (N_COARSE_ELEMENTS_BITS + 7) / 8;
+    static constexpr intptr_t FINE_TABLE_BYTES = (1 << FINE_BITS);
+
+    // process 1 sample
+    static void store(
+            const float* const __restrict pqCoarseCentroids0,
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            float* const __restrict outputStore) {
+        const uint8_t* const __restrict coarse0 = code0;
+        const uint8_t* const __restrict fine0 = code0 + N_COARSE_ELEMENTS_BYTES;
+        const intptr_t coarseCode0 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse0);
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const float* const csrc = pqCoarseCentroids0 +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode0) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc = pqFineCentroids0 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputStore[CPOS + j] = csrc[j] + fsrc[j];
+        }
+        Index2LevelDecoderImpl<
+                DIM, COARSE_SIZE, FINE_SIZE, COARSE_BITS, FINE_BITS,
+                CPOS + QPOS_LEFT>::
+                store(pqCoarseCentroids0, pqFineCentroids0, code0, outputStore);
+    }
+
+    // process 1 sample
+    static void accum(
+            const float* const __restrict pqCoarseCentroids0,
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict coarse0 = code0;
+        const uint8_t* const __restrict fine0 = code0 + N_COARSE_ELEMENTS_BYTES;
+        const intptr_t coarseCode0 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse0);
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const float* const csrc = pqCoarseCentroids0 +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode0) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc = pqFineCentroids0 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputAccum[CPOS + j] += weight0 * (csrc[j] + fsrc[j]);
+        }
+        Index2LevelDecoderImpl<
+                DIM, COARSE_SIZE, FINE_SIZE, COARSE_BITS, FINE_BITS,
+                CPOS + QPOS_LEFT>::
+                accum(pqCoarseCentroids0,
+                      pqFineCentroids0,
+                      code0,
+                      weight0,
+                      outputAccum);
+    }
+
+    // Process 2 samples.
+    // Each code uses its own coarse pq centroids table and fine pq centroids
+    // table.
+    static void accum(
+            const float* const __restrict pqCoarseCentroids0,
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const float* const __restrict pqCoarseCentroids1,
+            const float* const __restrict pqFineCentroids1,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict coarse0 = code0;
+        const uint8_t* const __restrict coarse1 = code1;
+        const uint8_t* const __restrict fine0 = code0 + N_COARSE_ELEMENTS_BYTES;
+        const uint8_t* const __restrict fine1 = code1 + N_COARSE_ELEMENTS_BYTES;
+        const intptr_t coarseCode0 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse0);
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const intptr_t coarseCode1 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse1);
+        const intptr_t fineCode1 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine1);
+        const float* const csrc0 = pqCoarseCentroids0 +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode0) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc0 = pqFineCentroids0 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const csrc1 = pqCoarseCentroids1 +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode1) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc1 = pqFineCentroids1 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode1) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputAccum[CPOS + j] +=
+                    weight0 * (csrc0[j] + fsrc0[j]) +
+                    weight1 * (csrc1[j] + fsrc1[j]);
+        }
+        Index2LevelDecoderImpl<
+                DIM, COARSE_SIZE, FINE_SIZE, COARSE_BITS, FINE_BITS,
+                CPOS + QPOS_LEFT>::
+                accum(pqCoarseCentroids0,
+                      pqFineCentroids0,
+                      code0,
+                      weight0,
+                      pqCoarseCentroids1,
+                      pqFineCentroids1,
+                      code1,
+                      weight1,
+                      outputAccum);
+    }
+
+    // Process 2 samples.
+    // Coarse pq centroids table and fine pq centroids table are shared among
+    // codes.
+    static void accum(
+            const float* const __restrict pqCoarseCentroids,
+            const float* const __restrict pqFineCentroids,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict coarse0 = code0;
+        const uint8_t* const __restrict coarse1 = code1;
+        const uint8_t* const __restrict fine0 = code0 + N_COARSE_ELEMENTS_BYTES;
+        const uint8_t* const __restrict fine1 = code1 + N_COARSE_ELEMENTS_BYTES;
+        const intptr_t coarseCode0 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse0);
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const intptr_t coarseCode1 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse1);
+        const intptr_t fineCode1 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine1);
+        const float* const csrc0 = pqCoarseCentroids +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode0) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc0 = pqFineCentroids +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const csrc1 = pqCoarseCentroids +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode1) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc1 = pqFineCentroids +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode1) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputAccum[CPOS + j] +=
+                    weight0 * (csrc0[j] + fsrc0[j]) +
+                    weight1 * (csrc1[j] + fsrc1[j]);
+        }
+        Index2LevelDecoderImpl<
+                DIM, COARSE_SIZE, FINE_SIZE, COARSE_BITS, FINE_BITS,
+                CPOS + QPOS_LEFT>::
+                accum(pqCoarseCentroids,
+                      pqFineCentroids,
+                      code0,
+                      weight0,
+                      code1,
+                      weight1,
+                      outputAccum);
+    }
+
+    // Process 3 samples.
+    // Each code uses its own coarse pq centroids table and fine pq centroids
+    // table.
+    static void accum(
+            const float* const __restrict pqCoarseCentroids0,
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const float* const __restrict pqCoarseCentroids1,
+            const float* const __restrict pqFineCentroids1,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            const float* const __restrict pqCoarseCentroids2,
+            const float* const __restrict pqFineCentroids2,
+            const uint8_t* const __restrict code2,
+            const float weight2,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict coarse0 = code0;
+        const uint8_t* const __restrict coarse1 = code1;
+        const uint8_t* const __restrict coarse2 = code2;
+        const uint8_t* const __restrict fine0 = code0 + N_COARSE_ELEMENTS_BYTES;
+        const uint8_t* const __restrict fine1 = code1 + N_COARSE_ELEMENTS_BYTES;
+        const uint8_t* const __restrict fine2 = code2 + N_COARSE_ELEMENTS_BYTES;
+        const intptr_t coarseCode0 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse0);
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const intptr_t coarseCode1 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse1);
+        const intptr_t fineCode1 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine1);
+        const intptr_t coarseCode2 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse2);
+        const intptr_t fineCode2 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine2);
+        const float* const csrc0 = pqCoarseCentroids0 +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode0) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc0 = pqFineCentroids0 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const csrc1 = pqCoarseCentroids1 +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode1) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc1 = pqFineCentroids1 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode1) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const csrc2 = pqCoarseCentroids2 +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode2) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc2 = pqFineCentroids2 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode2) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputAccum[CPOS + j] +=
+                    weight0 * (csrc0[j] + fsrc0[j]) +
+                    weight1 * (csrc1[j] + fsrc1[j]) +
+                    weight2 * (csrc2[j] + fsrc2[j]);
+        }
+        Index2LevelDecoderImpl<
+                DIM, COARSE_SIZE, FINE_SIZE, COARSE_BITS, FINE_BITS,
+                CPOS + QPOS_LEFT>::
+                accum(pqCoarseCentroids0,
+                      pqFineCentroids0,
+                      code0,
+                      weight0,
+                      pqCoarseCentroids1,
+                      pqFineCentroids1,
+                      code1,
+                      weight1,
+                      pqCoarseCentroids2,
+                      pqFineCentroids2,
+                      code2,
+                      weight2,
+                      outputAccum);
+    }
+
+    // Process 3 samples.
+    // Coarse pq centroids table and fine pq centroids table are shared among
+    // codes.
+    static void accum(
+            const float* const __restrict pqCoarseCentroids,
+            const float* const __restrict pqFineCentroids,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            const uint8_t* const __restrict code2,
+            const float weight2,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict coarse0 = code0;
+        const uint8_t* const __restrict coarse1 = code1;
+        const uint8_t* const __restrict coarse2 = code2;
+        const uint8_t* const __restrict fine0 = code0 + N_COARSE_ELEMENTS_BYTES;
+        const uint8_t* const __restrict fine1 = code1 + N_COARSE_ELEMENTS_BYTES;
+        const uint8_t* const __restrict fine2 = code2 + N_COARSE_ELEMENTS_BYTES;
+        const intptr_t coarseCode0 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse0);
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const intptr_t coarseCode1 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse1);
+        const intptr_t fineCode1 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine1);
+        const intptr_t coarseCode2 = detail::
+                UintReader<DIM, COARSE_SIZE, COARSE_BITS, coarseCentroidIdx>::
+                        get(coarse2);
+        const intptr_t fineCode2 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine2);
+        const float* const csrc0 = pqCoarseCentroids +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode0) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc0 = pqFineCentroids +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const csrc1 = pqCoarseCentroids +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode1) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc1 = pqFineCentroids +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode1) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const csrc2 = pqCoarseCentroids +
+                (coarseCentroidIdx * COARSE_TABLE_BYTES + coarseCode2) *
+                        COARSE_SIZE +
+                coarseCentroidOffset;
+        const float* const fsrc2 = pqFineCentroids +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode2) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputAccum[CPOS + j] +=
+                    weight0 * (csrc0[j] + fsrc0[j]) +
+                    weight1 * (csrc1[j] + fsrc1[j]) +
+                    weight2 * (csrc2[j] + fsrc2[j]);
+        }
+        Index2LevelDecoderImpl<
+                DIM, COARSE_SIZE, FINE_SIZE, COARSE_BITS, FINE_BITS,
+                CPOS + QPOS_LEFT>::
+                accum(pqCoarseCentroids,
+                      pqFineCentroids,
+                      code0,
+                      weight0,
+                      code1,
+                      weight1,
+                      code2,
+                      weight2,
+                      outputAccum);
+    }
+};
+
 // This partial specialization is expected to do nothing.
 template <
         intptr_t DIM,
