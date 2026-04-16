@@ -122,6 +122,49 @@ inline float32x4x2_t elementaryBlock8x1bAccum(
     return {result0, result1};
 }
 
+// Processes 8 float values from 4 fine centroids of FINE_SIZE=2.
+// Returns {
+//   [0..1] = *fine0[0..1];
+//   [2..3] = *fine1[0..1];
+//   [4..5] = *fine2[0..1];
+//   [6..7] = *fine3[0..1];
+// }
+inline float32x4x2_t elementaryBlock2x4b(
+        const float* const __restrict fine0,
+        const float* const __restrict fine1,
+        const float* const __restrict fine2,
+        const float* const __restrict fine3) {
+    // Each fine* points to 2 consecutive floats; use 64-bit loads then combine.
+    const auto v0 = vld1_f32(fine0);
+    const auto v1 = vld1_f32(fine1);
+    const auto v2 = vld1_f32(fine2);
+    const auto v3 = vld1_f32(fine3);
+    return {vcombine_f32(v0, v1), vcombine_f32(v2, v3)};
+}
+
+// Processes 8 float values.
+// Returns {
+//   [0..1] = existingValue[0..1] + weight * (*fine0[0..1]);
+//   [2..3] = existingValue[2..3] + weight * (*fine1[0..1]);
+//   [4..5] = existingValue[4..5] + weight * (*fine2[0..1]);
+//   [6..7] = existingValue[6..7] + weight * (*fine3[0..1]);
+// }
+inline float32x4x2_t elementaryBlock2x4bAccum(
+        const float* const __restrict fine0,
+        const float* const __restrict fine1,
+        const float* const __restrict fine2,
+        const float* const __restrict fine3,
+        const float weight,
+        const float32x4x2_t existingValue) {
+    const auto fineValue = elementaryBlock2x4b(fine0, fine1, fine2, fine3);
+    const auto weightNeon = vdupq_n_f32(weight);
+    const auto result0 =
+            vfmaq_f32(existingValue.val[0], weightNeon, fineValue.val[0]);
+    const auto result1 =
+            vfmaq_f32(existingValue.val[1], weightNeon, fineValue.val[1]);
+    return {result0, result1};
+}
+
 // The following code uses template-based for-loop unrolling,
 //   because the compiler does not do that on its own as needed.
 // The idea is the following:
@@ -146,6 +189,7 @@ template <
         intptr_t FINE_SIZE,
         intptr_t FINE_BITS,
         intptr_t CPOS,
+        bool FINE_SIZE_EQ_2 = FINE_SIZE == 2,
         bool FINE_SIZE_EQ_4 = FINE_SIZE == 4,
         bool QPOS_LEFT_GE_8 = (FINE_SIZE - CPOS % FINE_SIZE >= 8),
         bool QPOS_LEFT_GE_4 = (FINE_SIZE - CPOS % FINE_SIZE >= 4),
@@ -163,6 +207,7 @@ struct IndexPQDecoderImpl<
         4,
         FINE_BITS,
         CPOS,
+        false,
         true,
         QPOS_LEFT_GE_8,
         QPOS_LEFT_GE_4,
@@ -609,6 +654,7 @@ struct IndexPQDecoderImpl<
         FINE_BITS,
         CPOS,
         false,
+        false,
         true,
         true,
         false> {
@@ -938,6 +984,7 @@ struct IndexPQDecoderImpl<
         CPOS,
         false,
         false,
+        false,
         true,
         false> {
     static constexpr intptr_t fineCentroidIdx = CPOS / FINE_SIZE;
@@ -1247,11 +1294,533 @@ struct IndexPQDecoderImpl<
     }
 };
 
+// NEON-optimized specialization for FINE_SIZE=2.
+// Processes 8 floats per loop (4 centroids * 2 floats each), advances CPOS+8.
+template <intptr_t DIM, intptr_t CPOS, intptr_t FINE_BITS, bool QPOS_LEFT_GE_8, bool QPOS_LEFT_GE_4>
+struct IndexPQDecoderImpl<
+        DIM,
+        2,
+        FINE_BITS,
+        CPOS,
+        true,
+        false,
+        QPOS_LEFT_GE_8,
+        QPOS_LEFT_GE_4,
+        false> {
+    static constexpr intptr_t FINE_SIZE = 2;
+
+    static constexpr intptr_t fineCentroidIdx = CPOS / FINE_SIZE;
+    static constexpr intptr_t fineCentroidOffset = CPOS % FINE_SIZE;
+
+    static constexpr intptr_t QPOS_LEFT = FINE_SIZE - fineCentroidOffset;
+
+    static constexpr intptr_t FINE_TABLE_BYTES = (1 << FINE_BITS);
+
+    // process 1 sample
+    static void store(
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            float* const __restrict outputStore) {
+        const uint8_t* const __restrict fine0 = code0;
+
+        // process chunks, 2 float, but 8 floats per loop
+        const intptr_t fineCode0a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine0);
+        const intptr_t fineCode0b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine0);
+        const intptr_t fineCode0c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine0);
+        const intptr_t fineCode0d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine0);
+
+        const auto storeValue = elementaryBlock2x4b(
+                pqFineCentroids0 + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode0a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode0b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode0c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode0d) * FINE_SIZE + fineCentroidOffset);
+
+        vst1q_f32(outputStore + CPOS, storeValue.val[0]);
+        vst1q_f32(outputStore + CPOS + 4, storeValue.val[1]);
+
+        // next
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + 8>::store(
+                pqFineCentroids0, code0, outputStore);
+    }
+
+    // process 1 sample
+    static void accum(
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict fine0 = code0;
+
+        const intptr_t fineCode0a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine0);
+        const intptr_t fineCode0b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine0);
+        const intptr_t fineCode0c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine0);
+        const intptr_t fineCode0d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine0);
+
+        auto existingValue = float32x4x2_t{
+                vld1q_f32(outputAccum + CPOS), vld1q_f32(outputAccum + CPOS + 4)};
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids0 + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode0a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode0b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode0c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode0d) * FINE_SIZE + fineCentroidOffset,
+                weight0,
+                existingValue);
+
+        vst1q_f32(outputAccum + CPOS, existingValue.val[0]);
+        vst1q_f32(outputAccum + CPOS + 4, existingValue.val[1]);
+
+        // next
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + 8>::accum(
+                pqFineCentroids0, code0, weight0, outputAccum);
+    }
+
+    // Process 2 samples.
+    // Each code uses its own fine pq centroids table.
+    static void accum(
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const float* const __restrict pqFineCentroids1,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict fine0 = code0;
+        const uint8_t* const __restrict fine1 = code1;
+
+        const intptr_t fineCode0a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine0);
+        const intptr_t fineCode0b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine0);
+        const intptr_t fineCode0c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine0);
+        const intptr_t fineCode0d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine0);
+        const intptr_t fineCode1a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine1);
+        const intptr_t fineCode1b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine1);
+        const intptr_t fineCode1c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine1);
+        const intptr_t fineCode1d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine1);
+
+        auto existingValue = float32x4x2_t{
+                vld1q_f32(outputAccum + CPOS), vld1q_f32(outputAccum + CPOS + 4)};
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids0 + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode0a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode0b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode0c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode0d) * FINE_SIZE + fineCentroidOffset,
+                weight0,
+                existingValue);
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids1 + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode1a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids1 + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode1b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids1 + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode1c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids1 + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode1d) * FINE_SIZE + fineCentroidOffset,
+                weight1,
+                existingValue);
+
+        vst1q_f32(outputAccum + CPOS, existingValue.val[0]);
+        vst1q_f32(outputAccum + CPOS + 4, existingValue.val[1]);
+
+        // next
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + 8>::accum(
+                pqFineCentroids0, code0, weight0,
+                pqFineCentroids1, code1, weight1,
+                outputAccum);
+    }
+
+    // Process 2 samples.
+    // Fine pq centroids table is shared among codes.
+    static void accum(
+            const float* const __restrict pqFineCentroids,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict fine0 = code0;
+        const uint8_t* const __restrict fine1 = code1;
+
+        const intptr_t fineCode0a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine0);
+        const intptr_t fineCode0b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine0);
+        const intptr_t fineCode0c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine0);
+        const intptr_t fineCode0d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine0);
+        const intptr_t fineCode1a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine1);
+        const intptr_t fineCode1b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine1);
+        const intptr_t fineCode1c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine1);
+        const intptr_t fineCode1d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine1);
+
+        auto existingValue = float32x4x2_t{
+                vld1q_f32(outputAccum + CPOS), vld1q_f32(outputAccum + CPOS + 4)};
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode0a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode0b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode0c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode0d) * FINE_SIZE + fineCentroidOffset,
+                weight0,
+                existingValue);
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode1a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode1b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode1c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode1d) * FINE_SIZE + fineCentroidOffset,
+                weight1,
+                existingValue);
+
+        vst1q_f32(outputAccum + CPOS, existingValue.val[0]);
+        vst1q_f32(outputAccum + CPOS + 4, existingValue.val[1]);
+
+        // next
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + 8>::accum(
+                pqFineCentroids, code0, weight0, code1, weight1, outputAccum);
+    }
+
+    // Process 3 samples.
+    // Each code uses its own fine pq centroids table.
+    static void accum(
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const float* const __restrict pqFineCentroids1,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            const float* const __restrict pqFineCentroids2,
+            const uint8_t* const __restrict code2,
+            const float weight2,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict fine0 = code0;
+        const uint8_t* const __restrict fine1 = code1;
+        const uint8_t* const __restrict fine2 = code2;
+
+        const intptr_t fineCode0a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine0);
+        const intptr_t fineCode0b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine0);
+        const intptr_t fineCode0c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine0);
+        const intptr_t fineCode0d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine0);
+        const intptr_t fineCode1a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine1);
+        const intptr_t fineCode1b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine1);
+        const intptr_t fineCode1c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine1);
+        const intptr_t fineCode1d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine1);
+        const intptr_t fineCode2a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine2);
+        const intptr_t fineCode2b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine2);
+        const intptr_t fineCode2c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine2);
+        const intptr_t fineCode2d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine2);
+
+        auto existingValue = float32x4x2_t{
+                vld1q_f32(outputAccum + CPOS), vld1q_f32(outputAccum + CPOS + 4)};
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids0 + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode0a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode0b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode0c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids0 + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode0d) * FINE_SIZE + fineCentroidOffset,
+                weight0,
+                existingValue);
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids1 + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode1a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids1 + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode1b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids1 + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode1c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids1 + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode1d) * FINE_SIZE + fineCentroidOffset,
+                weight1,
+                existingValue);
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids2 + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode2a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids2 + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode2b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids2 + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode2c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids2 + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode2d) * FINE_SIZE + fineCentroidOffset,
+                weight2,
+                existingValue);
+
+        vst1q_f32(outputAccum + CPOS, existingValue.val[0]);
+        vst1q_f32(outputAccum + CPOS + 4, existingValue.val[1]);
+
+        // next
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + 8>::accum(
+                pqFineCentroids0, code0, weight0,
+                pqFineCentroids1, code1, weight1,
+                pqFineCentroids2, code2, weight2,
+                outputAccum);
+    }
+
+    // Process 3 samples.
+    // Fine pq centroids table is shared among codes.
+    static void accum(
+            const float* const __restrict pqFineCentroids,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            const uint8_t* const __restrict code2,
+            const float weight2,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict fine0 = code0;
+        const uint8_t* const __restrict fine1 = code1;
+        const uint8_t* const __restrict fine2 = code2;
+
+        const intptr_t fineCode0a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine0);
+        const intptr_t fineCode0b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine0);
+        const intptr_t fineCode0c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine0);
+        const intptr_t fineCode0d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine0);
+        const intptr_t fineCode1a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine1);
+        const intptr_t fineCode1b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine1);
+        const intptr_t fineCode1c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine1);
+        const intptr_t fineCode1d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine1);
+        const intptr_t fineCode2a = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 0>::get(fine2);
+        const intptr_t fineCode2b = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 1>::get(fine2);
+        const intptr_t fineCode2c = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 2>::get(fine2);
+        const intptr_t fineCode2d = detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx + 3>::get(fine2);
+
+        auto existingValue = float32x4x2_t{
+                vld1q_f32(outputAccum + CPOS), vld1q_f32(outputAccum + CPOS + 4)};
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode0a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode0b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode0c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode0d) * FINE_SIZE + fineCentroidOffset,
+                weight0,
+                existingValue);
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode1a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode1b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode1c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode1d) * FINE_SIZE + fineCentroidOffset,
+                weight1,
+                existingValue);
+
+        existingValue = elementaryBlock2x4bAccum(
+                pqFineCentroids + ((fineCentroidIdx + 0) * FINE_TABLE_BYTES + fineCode2a) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 1) * FINE_TABLE_BYTES + fineCode2b) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 2) * FINE_TABLE_BYTES + fineCode2c) * FINE_SIZE + fineCentroidOffset,
+                pqFineCentroids + ((fineCentroidIdx + 3) * FINE_TABLE_BYTES + fineCode2d) * FINE_SIZE + fineCentroidOffset,
+                weight2,
+                existingValue);
+
+        vst1q_f32(outputAccum + CPOS, existingValue.val[0]);
+        vst1q_f32(outputAccum + CPOS + 4, existingValue.val[1]);
+
+        // next
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + 8>::accum(
+                pqFineCentroids, code0, weight0,
+                code1, weight1, code2, weight2,
+                outputAccum);
+    }
+};
+
+// Scalar fallback for FINE_SIZE != 4 with QPOS_LEFT < 4 (e.g. FINE_SIZE=2).
+template <intptr_t DIM, intptr_t FINE_SIZE, intptr_t FINE_BITS, intptr_t CPOS>
+struct IndexPQDecoderImpl<
+        DIM,
+        FINE_SIZE,
+        FINE_BITS,
+        CPOS,
+        false,
+        false,
+        false,
+        false,
+        false> {
+    static constexpr intptr_t fineCentroidIdx = CPOS / FINE_SIZE;
+    static constexpr intptr_t fineCentroidOffset = CPOS % FINE_SIZE;
+    static constexpr intptr_t QPOS_LEFT = FINE_SIZE - fineCentroidOffset;
+    static constexpr intptr_t FINE_TABLE_BYTES = (1 << FINE_BITS);
+
+    // process 1 sample
+    static void store(
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            float* const __restrict outputStore) {
+        const uint8_t* const __restrict fine0 = code0;
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const float* const src = pqFineCentroids0 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputStore[CPOS + j] = src[j];
+        }
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + QPOS_LEFT>::store(
+                pqFineCentroids0, code0, outputStore);
+    }
+
+    // process 1 sample
+    static void accum(
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict fine0 = code0;
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const float* const src = pqFineCentroids0 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputAccum[CPOS + j] += weight0 * src[j];
+        }
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + QPOS_LEFT>::accum(
+                pqFineCentroids0, code0, weight0, outputAccum);
+    }
+
+    // Process 2 samples.
+    // Each code uses its own fine pq centroids table.
+    static void accum(
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const float* const __restrict pqFineCentroids1,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict fine0 = code0;
+        const uint8_t* const __restrict fine1 = code1;
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const intptr_t fineCode1 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine1);
+        const float* const src0 = pqFineCentroids0 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const src1 = pqFineCentroids1 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode1) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputAccum[CPOS + j] += weight0 * src0[j] + weight1 * src1[j];
+        }
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + QPOS_LEFT>::accum(
+                pqFineCentroids0, code0, weight0,
+                pqFineCentroids1, code1, weight1,
+                outputAccum);
+    }
+
+    // Process 2 samples.
+    // Fine pq centroids table is shared among codes.
+    static void accum(
+            const float* const __restrict pqFineCentroids,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict fine0 = code0;
+        const uint8_t* const __restrict fine1 = code1;
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const intptr_t fineCode1 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine1);
+        const float* const src0 = pqFineCentroids +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const src1 = pqFineCentroids +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode1) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputAccum[CPOS + j] += weight0 * src0[j] + weight1 * src1[j];
+        }
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + QPOS_LEFT>::accum(
+                pqFineCentroids, code0, weight0, code1, weight1, outputAccum);
+    }
+
+    // Process 3 samples.
+    // Each code uses its own fine pq centroids table.
+    static void accum(
+            const float* const __restrict pqFineCentroids0,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const float* const __restrict pqFineCentroids1,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            const float* const __restrict pqFineCentroids2,
+            const uint8_t* const __restrict code2,
+            const float weight2,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict fine0 = code0;
+        const uint8_t* const __restrict fine1 = code1;
+        const uint8_t* const __restrict fine2 = code2;
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const intptr_t fineCode1 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine1);
+        const intptr_t fineCode2 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine2);
+        const float* const src0 = pqFineCentroids0 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const src1 = pqFineCentroids1 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode1) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const src2 = pqFineCentroids2 +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode2) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputAccum[CPOS + j] +=
+                    weight0 * src0[j] + weight1 * src1[j] + weight2 * src2[j];
+        }
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + QPOS_LEFT>::accum(
+                pqFineCentroids0, code0, weight0,
+                pqFineCentroids1, code1, weight1,
+                pqFineCentroids2, code2, weight2,
+                outputAccum);
+    }
+
+    // Process 3 samples.
+    // Fine pq centroids table is shared among codes.
+    static void accum(
+            const float* const __restrict pqFineCentroids,
+            const uint8_t* const __restrict code0,
+            const float weight0,
+            const uint8_t* const __restrict code1,
+            const float weight1,
+            const uint8_t* const __restrict code2,
+            const float weight2,
+            float* const __restrict outputAccum) {
+        const uint8_t* const __restrict fine0 = code0;
+        const uint8_t* const __restrict fine1 = code1;
+        const uint8_t* const __restrict fine2 = code2;
+        const intptr_t fineCode0 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine0);
+        const intptr_t fineCode1 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine1);
+        const intptr_t fineCode2 =
+                detail::UintReader<DIM, FINE_SIZE, FINE_BITS, fineCentroidIdx>::
+                        get(fine2);
+        const float* const src0 = pqFineCentroids +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode0) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const src1 = pqFineCentroids +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode1) * FINE_SIZE +
+                fineCentroidOffset;
+        const float* const src2 = pqFineCentroids +
+                (fineCentroidIdx * FINE_TABLE_BYTES + fineCode2) * FINE_SIZE +
+                fineCentroidOffset;
+        for (intptr_t j = 0; j < QPOS_LEFT; j++) {
+            outputAccum[CPOS + j] +=
+                    weight0 * src0[j] + weight1 * src1[j] + weight2 * src2[j];
+        }
+        IndexPQDecoderImpl<DIM, FINE_SIZE, FINE_BITS, CPOS + QPOS_LEFT>::accum(
+                pqFineCentroids, code0, weight0,
+                code1, weight1, code2, weight2,
+                outputAccum);
+    }
+};
+
 // This partial specialization is expected to do nothing.
 template <
         intptr_t DIM,
         intptr_t FINE_SIZE,
         intptr_t FINE_BITS,
+        bool FINE_SIZE_EQ_2,
         bool FINE_SIZE_EQ_4,
         bool QPOS_LEFT_GE_8,
         bool QPOS_LEFT_GE_4>
@@ -1260,6 +1829,7 @@ struct IndexPQDecoderImpl<
         FINE_SIZE,
         FINE_BITS,
         DIM,
+        FINE_SIZE_EQ_2,
         FINE_SIZE_EQ_4,
         QPOS_LEFT_GE_8,
         QPOS_LEFT_GE_4,
