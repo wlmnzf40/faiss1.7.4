@@ -189,6 +189,7 @@ template <
         intptr_t FINE_SIZE,
         intptr_t FINE_BITS,
         intptr_t CPOS,
+        bool FINE_SIZE_EQ_2 = FINE_SIZE == 2,
         bool FINE_SIZE_EQ_4 = FINE_SIZE == 4,
         bool QPOS_LEFT_GE_8 = (FINE_SIZE - CPOS % FINE_SIZE >= 8),
         bool QPOS_LEFT_GE_4 = (FINE_SIZE - CPOS % FINE_SIZE >= 4),
@@ -206,6 +207,7 @@ struct IndexPQDecoderImpl<
         4,
         FINE_BITS,
         CPOS,
+        false,
         true,
         QPOS_LEFT_GE_8,
         QPOS_LEFT_GE_4,
@@ -652,6 +654,7 @@ struct IndexPQDecoderImpl<
         FINE_BITS,
         CPOS,
         false,
+        false,
         true,
         true,
         false> {
@@ -981,6 +984,7 @@ struct IndexPQDecoderImpl<
         CPOS,
         false,
         false,
+        false,
         true,
         false> {
     static constexpr intptr_t fineCentroidIdx = CPOS / FINE_SIZE;
@@ -1298,6 +1302,7 @@ struct IndexPQDecoderImpl<
         2,
         FINE_BITS,
         CPOS,
+        true,
         false,
         QPOS_LEFT_GE_8,
         QPOS_LEFT_GE_4,
@@ -1613,6 +1618,7 @@ struct IndexPQDecoderImpl<
         false,
         false,
         false,
+        false,
         false> {
     static constexpr intptr_t fineCentroidIdx = CPOS / FINE_SIZE;
     static constexpr intptr_t fineCentroidOffset = CPOS % FINE_SIZE;
@@ -1814,6 +1820,7 @@ template <
         intptr_t DIM,
         intptr_t FINE_SIZE,
         intptr_t FINE_BITS,
+        bool FINE_SIZE_EQ_2,
         bool FINE_SIZE_EQ_4,
         bool QPOS_LEFT_GE_8,
         bool QPOS_LEFT_GE_4>
@@ -1822,6 +1829,7 @@ struct IndexPQDecoderImpl<
         FINE_SIZE,
         FINE_BITS,
         DIM,
+        FINE_SIZE_EQ_2,
         FINE_SIZE_EQ_4,
         QPOS_LEFT_GE_8,
         QPOS_LEFT_GE_4,

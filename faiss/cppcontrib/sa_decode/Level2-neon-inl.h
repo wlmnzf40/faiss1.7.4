@@ -220,6 +220,7 @@ template <
         intptr_t COARSE_BITS,
         intptr_t FINE_BITS,
         intptr_t CPOS,
+        bool FINE_SIZE_EQ_2 = FINE_SIZE == 2,
         bool FINE_SIZE_EQ_4 = FINE_SIZE == 4,
         bool QPOS_LEFT_GE_8 = (FINE_SIZE - CPOS % FINE_SIZE >= 8),
         bool QPOS_LEFT_GE_4 = (FINE_SIZE - CPOS % FINE_SIZE >= 4),
@@ -241,6 +242,7 @@ struct Index2LevelDecoderImpl<
         COARSE_BITS,
         FINE_BITS,
         CPOS,
+        false,
         true,
         QPOS_LEFT_GE_8,
         QPOS_LEFT_GE_4,
@@ -881,6 +883,7 @@ struct Index2LevelDecoderImpl<
         FINE_BITS,
         CPOS,
         false,
+        false,
         true,
         true,
         false> {
@@ -1405,6 +1408,7 @@ struct Index2LevelDecoderImpl<
         CPOS,
         false,
         false,
+        false,
         true,
         false> {
     static constexpr intptr_t coarseCentroidIdx = CPOS / COARSE_SIZE;
@@ -1918,6 +1922,7 @@ struct Index2LevelDecoderImpl<
         COARSE_BITS,
         FINE_BITS,
         CPOS,
+        true,
         false,
         QPOS_LEFT_GE_8,
         QPOS_LEFT_GE_4,
@@ -2294,6 +2299,7 @@ struct Index2LevelDecoderImpl<
         false,
         false,
         false,
+        false,
         false> {
     static constexpr intptr_t coarseCentroidIdx = CPOS / COARSE_SIZE;
     static constexpr intptr_t coarseCentroidOffset = CPOS % COARSE_SIZE;
@@ -2666,6 +2672,7 @@ template <
         intptr_t FINE_SIZE,
         intptr_t COARSE_BITS,
         intptr_t FINE_BITS,
+        bool FINE_SIZE_EQ_2,
         bool FINE_SIZE_EQ_4,
         bool QPOS_LEFT_GE_8,
         bool QPOS_LEFT_GE_4>
@@ -2676,6 +2683,7 @@ struct Index2LevelDecoderImpl<
         COARSE_BITS,
         FINE_BITS,
         DIM,
+        FINE_SIZE_EQ_2,
         FINE_SIZE_EQ_4,
         QPOS_LEFT_GE_8,
         QPOS_LEFT_GE_4,
